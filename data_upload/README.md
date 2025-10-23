@@ -1,1 +1,0 @@
-write scripts here for spatial and tabular loading. 

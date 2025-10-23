@@ -28,4 +28,3 @@ h3
 lxml
 scikit-image
 rasterio
-git+ssh://git@github.com/Safe-Streets-Research/ssr_tools.git@v2.1.5

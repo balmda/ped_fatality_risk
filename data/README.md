@@ -1,1 +1,0 @@
-Please only store scratch data here, not core data that is loaded to the database. This could be used as a directory to export a csv to for basic review. 
