@@ -11,10 +11,7 @@ Notes
 - Mueller model uses speeds internally in km/h; x-axis can be shown in mph or km/h.
 """
 
-import argparse
-import json
 from typing import Union, Sequence, Optional, Dict, Any, Tuple, List
-
 import numpy as np
 import matplotlib.pyplot as plt
 from math import atan2, degrees
