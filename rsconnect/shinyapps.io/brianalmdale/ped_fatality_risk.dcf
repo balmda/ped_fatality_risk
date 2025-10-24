@@ -5,6 +5,6 @@ account: brianalmdale
 server: shinyapps.io
 hostUrl: https://api.shinyapps.io/v1
 appId: 15857325
-bundleId: 11078719
+bundleId: 11078766
 url: https://brianalmdale.shinyapps.io/ped_fatality_risk/
 version: 1

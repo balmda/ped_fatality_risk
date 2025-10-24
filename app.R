@@ -476,17 +476,28 @@ server <- function(input, output, session) {
         lbl <- sprintf("%sTefft — %dy, %d\" %d lb, %s",
                        idtxt, round(tp$age_years), round(tp$height_in), round(tp$weight_lb), veh)
         
+        pid   <- tp[[input$idKey]]
+        pid_t <- ifelse(is.na(pid), "", as.character(pid))
+        ht_tefft <- sprintf(
+          "<b>Tefft — ID: %s</b><br>%%{y:.2%%} at %%{x:.1f} %s<extra></extra>",
+          pid_t, units
+        )
+        
         p <- add_lines(
           p, x = x, y = y, name = lbl,
           line = list(color = nz_col(col), width = 3, dash = "solid"),
-          hovertemplate = sprintf("<b>%%{y:.2%%}</b> at %%{x:.1f} %s<extra></extra>", units)
+          hovertemplate = ht_tefft
         )
+        
         
         for (q in pct) {
           xq <- crossing_x(x, y, q); if (is.null(xq)) next
-          p <- add_markers(p, x = xq, y = q, showlegend = FALSE,
-                           marker = list(size = 9, color = nz_col(col),
-                                         line = list(color = "#ffffff", width = 1)))
+          p <- add_markers(
+            p, x = xq, y = q, showlegend = FALSE,
+            marker = list(size = 9, color = nz_col(col),
+                          line = list(color = "#ffffff", width = 1)),
+            hovertemplate = ht_tefft
+          )
           if (isTRUE(input$showLabels)) {
             ang <- if (rotMode == "auto") slope_angle_deg(x, y, xq) else if (rotMode=="fixed") fixedAngle else 0
             annotations[[length(annotations)+1]] <- list(
@@ -525,17 +536,29 @@ server <- function(input, output, session) {
         lbl2 <- sprintf("%sMueller — %dy, HLE %d cm, %s, %s",
                         idtxt, round(mp$age_years), round(hle), sexlab, sev_map[[sev]])
         
+        pid   <- mp[[input$idKey]]
+        pid_t <- ifelse(is.na(pid), "", as.character(pid))
+        ht_mueller <- sprintf(
+          "<b>Mueller — ID: %s</b><br>%%{y:.2%%} at %%{x:.1f} %s<extra></extra>",
+          pid_t, units
+        )
+        
         p <- add_lines(
           p, x = x, y = y2, name = lbl2,
           line = list(color = nz_col(col), width = 3, dash = "dot"),
-          hovertemplate = sprintf("<b>%%{y:.2%%}</b> at %%{x:.1f} %s<extra></extra>", units)
+          hovertemplate = ht_mueller
         )
+        
         
         for (q in pct) {
           xq <- crossing_x(x, y2, q); if (is.null(xq)) next
-          p <- add_markers(p, x = xq, y = q, showlegend = FALSE,
-                           marker = list(size = 9, color = nz_col(col),
-                                         line = list(color = "#ffffff", width = 1)))
+          p <- add_markers(
+            p, x = xq, y = q, showlegend = FALSE,
+            marker = list(size = 9, color = nz_col(col),
+                          line = list(color = "#ffffff", width = 1)),
+            hovertemplate = ht_mueller
+          )
+          
           if (isTRUE(input$showLabels)) {
             ang <- if (rotMode == "auto") slope_angle_deg(x, y2, xq) else if (rotMode=="fixed") fixedAngle else 0
             annotations[[length(annotations)+1]] <- list(
@@ -576,13 +599,16 @@ server <- function(input, output, session) {
         gridcolor = "#333333",
         zerolinecolor = "#333333"
       ),
+      # ↓ Put legend under the plot
       legend = list(
         orientation = "h",
-        yanchor = "bottom", y = 1.02, x = 0,
-        bgcolor="rgba(0,0,0,0)",
+        y = -0.18, yanchor = "top",
+        x = 0, xanchor = "left",
+        bgcolor = "rgba(0,0,0,0)",
         font = list(color = "white")
       ),
-      margin = list(l=64, r=24, t=64, b=64),
+      # ↑ Extra bottom margin so the legend has room
+      margin = list(l = 64, r = 24, t = 72, b = 110),
       annotations = annotations
     )
     p
@@ -629,6 +655,6 @@ server <- function(input, output, session) {
 
 shinyApp(ui, server)
 
-
+# 
 # library(rsconnect)
 # rsconnect::deployApp('/Users/balmdale/code/ped_fatality_risk')
