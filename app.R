@@ -94,7 +94,7 @@ nz_col <- function(col) {
   col
 }
 
-# ---- Coercion helpers for editable tables / JSON ----
+# ---- Coercion helpers for editable tables ----
 coerce_scalar <- function(value, template_col) {
   if (length(value) > 1) value <- value[1]
   if (is.integer(template_col))  return(as.integer(ifelse(value == "" | is.na(value), NA, value)))
@@ -181,12 +181,6 @@ ui <- fluidPage(
                  actionButton("delTefft","Delete selected Tefft row(s)"),
                  downloadButton("dlTefftCSV","Download Tefft CSV"),
                  downloadButton("dlTefftJSON","Download Tefft JSON")
-               ),
-               h6("Tefft JSON editor"),
-               textAreaInput("tefftJSON", label = NULL, value = "", rows = 8, placeholder = "Paste/edit JSON array of objects…"),
-               div(
-                 actionButton("fillTefftJSON","Fill editor from table"),
-                 actionButton("applyTefftJSON","Apply editor to Tefft")
                )
         ),
         column(6,
@@ -197,12 +191,6 @@ ui <- fluidPage(
                  actionButton("delMueller","Delete selected Mueller row(s)"),
                  downloadButton("dlMuellerCSV","Download Mueller CSV"),
                  downloadButton("dlMuellerJSON","Download Mueller JSON")
-               ),
-               h6("Mueller JSON editor"),
-               textAreaInput("muellerJSON", label = NULL, value = "", rows = 8, placeholder = "Paste/edit JSON array of objects…"),
-               div(
-                 actionButton("fillMuellerJSON","Fill editor from table"),
-                 actionButton("applyMuellerJSON","Apply editor to Mueller")
                )
         )
       )
@@ -282,7 +270,7 @@ server <- function(input, output, session) {
     df <- isolate(rv$tefft)
     
     i <- as.integer(info$row)
-    j <- as.integer(info$col) + 1   # <<<<<< IMPORTANT: 0-based -> 1-based
+    j <- as.integer(info$col) + 1
     
     if (is.na(i) || is.na(j)) return()
     if (i < 1 || i > nrow(df)) return()
@@ -305,7 +293,7 @@ server <- function(input, output, session) {
     df <- isolate(rv$mueller)
     
     i <- as.integer(info$row)
-    j <- as.integer(info$col) + 1   # <<<<<< IMPORTANT: 0-based -> 1-based
+    j <- as.integer(info$col) + 1
     
     if (is.na(i) || is.na(j)) return()
     if (i < 1 || i > nrow(df)) return()
@@ -339,7 +327,7 @@ server <- function(input, output, session) {
     }
   })
   
-  # ---------- Downloads ----------
+  # ---------- Downloads (CSV + JSON) ----------
   output$dlTefftCSV <- downloadHandler(
     filename = function() "tefft_profiles.csv",
     content  = function(file) write.csv(rv$tefft, file, row.names = FALSE)
@@ -356,57 +344,6 @@ server <- function(input, output, session) {
     filename = function() "mueller_profiles.json",
     content  = function(file) writeLines(jsonlite::toJSON(rv$mueller, pretty = TRUE, na = "null", dataframe = "rows"), file)
   )
-  
-  # ---------- JSON editors ----------
-  observeEvent(input$fillTefftJSON, {
-    updateTextAreaInput(session, "tefftJSON",
-                        value = jsonlite::toJSON(rv$tefft, pretty = TRUE, na = "null", dataframe = "rows")
-    )
-  })
-  observeEvent(input$fillMuellerJSON, {
-    updateTextAreaInput(session, "muellerJSON",
-                        value = jsonlite::toJSON(rv$mueller, pretty = TRUE, na = "null", dataframe = "rows")
-    )
-  })
-  observeEvent(input$applyTefftJSON, {
-    txt <- input$tefftJSON
-    if (!nzchar(txt)) {
-      showNotification("Tefft JSON editor is empty", type = "warning"); return()
-    }
-    tryCatch({
-      df <- jsonlite::fromJSON(txt)
-      if (!is.data.frame(df)) stop("JSON must be an array of objects")
-      req <- c("profile_id","age_years","height_in","weight_lb","vehicle_is_truck")
-      miss <- setdiff(req, names(df))
-      if (length(miss)) stop(paste("Missing Tefft columns:", paste(miss, collapse = ", ")))
-      rv$tefft <- coerce_df_to_template(df, rv$tefft[0, ])
-      showNotification("Applied Tefft JSON", type = "message")
-    }, error = function(e) {
-      showNotification(paste("Tefft JSON error:", e$message), type = "error", duration = 6)
-    })
-  })
-  observeEvent(input$applyMuellerJSON, {
-    txt <- input$muellerJSON
-    if (!nzchar(txt)) {
-      showNotification("Mueller JSON editor is empty", type = "warning"); return()
-    }
-    tryCatch({
-      df <- jsonlite::fromJSON(txt)
-      if (!is.data.frame(df)) stop("JSON must be an array of objects")
-      base_req <- c("profile_id","age_years","sex_male","severity")
-      miss <- setdiff(base_req, names(df))
-      if (length(miss)) stop(paste("Missing Mueller columns:", paste(miss, collapse = ", ")))
-      if (!("hle_cm" %in% names(df)) && !("vehicle_type" %in% names(df))) {
-        stop("Mueller profiles need either 'hle_cm' or 'vehicle_type'")
-      }
-      if (!("hle_cm" %in% names(df))) df$hle_cm <- NA_real_
-      if (!("vehicle_type" %in% names(df))) df$vehicle_type <- NA_character_
-      rv$mueller <- coerce_df_to_template(df, rv$mueller[0, ])
-      showNotification("Applied Mueller JSON", type = "message")
-    }, error = function(e) {
-      showNotification(paste("Mueller JSON error:", e$message), type = "error", duration = 6)
-    })
-  })
   
   # ---------- Add / Clear profile modals ----------
   observeEvent(input$addTefft, {
@@ -691,6 +628,7 @@ server <- function(input, output, session) {
 }
 
 shinyApp(ui, server)
+
 
 # library(rsconnect)
 # rsconnect::deployApp('/Users/balmdale/code/ped_fatality_risk')
