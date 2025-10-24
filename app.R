@@ -1,7 +1,8 @@
-# install.packages(c("shiny","plotly","jsonlite"))
+# install.packages(c("shiny","plotly","jsonlite","DT"))
 library(shiny)
 library(plotly)
 library(jsonlite)
+library(DT)
 
 options(shiny.fullstacktrace = TRUE)
 
@@ -17,13 +18,13 @@ tefft_prob <- function(speed_mph, age_years, height_in, weight_lb, bmi = NULL, t
   BMI_above25 <- pmax(BMI - 25, 0)
   w_term <- (weight_lb / 100)^(-0.5)
   z <- 196.8 +
-       0.202  * speed_mph +
-       0.00712 * (age_years / 10)^3 -
-       1.174  * height_in -
-       90.5   * w_term -
-       2.247  * BMI +
-       1.557  * BMI_above25 +
-       0.543  * truck
+    0.202  * speed_mph +
+    0.00712 * (age_years / 10)^3 -
+    1.174  * height_in -
+    90.5   * w_term -
+    2.247  * BMI +
+    1.557  * BMI_above25 +
+    0.543  * truck
   plogis(z)
 }
 tefft_prob_guarded <- function(speed_mph, age_years, height_in, weight_lb, bmi = NULL, truck = 0,
@@ -71,9 +72,10 @@ vehicle_hle_guess <- function(vehicle_type, suv_as = "pickup", van_as = "pickup"
   stop(sprintf("Unknown vehicle_type '%s'", vehicle_type))
 }
 
-# ---------- math helpers ----------
+# ---------- helpers ----------
 linspace <- function(min, max, step) seq(min, max, by = step)
 crossing_x <- function(xs, ys, yq) {
+  if (length(xs) != length(ys) || length(xs) < 2) return(NULL)
   if (yq < min(ys) || yq > max(ys)) return(NULL)
   idx <- which(ys >= yq)[1]
   if (is.na(idx) || idx <= 1) return(NULL)
@@ -87,9 +89,40 @@ slope_angle_deg <- function(xs, ys, xq) {
   dx <- xs[idx] - xs[idx-1]; dy <- ys[idx] - ys[idx-1]
   atan2(dy, dx) * 180 / pi
 }
+nz_col <- function(col) {
+  if (is.null(col) || is.na(col) || (is.character(col) && identical(col, ""))) return(NULL)
+  col
+}
 
-# ---------- UI ----------
+# ---- Coercion helpers for editable tables / JSON ----
+coerce_scalar <- function(value, template_col) {
+  if (length(value) > 1) value <- value[1]
+  if (is.integer(template_col))  return(as.integer(ifelse(value == "" | is.na(value), NA, value)))
+  if (is.numeric(template_col))  return(as.numeric(ifelse(value == "" | is.na(value), NA, value)))
+  if (is.logical(template_col))  return(as.logical(as.integer(ifelse(value == "" | is.na(value), NA, value))))
+  return(as.character(value))
+}
+coerce_df_to_template <- function(df, template) {
+  for (nm in setdiff(names(template), names(df))) {
+    proto <- template[[nm]]
+    if (is.integer(proto))      df[[nm]] <- as.integer(NA)
+    else if (is.numeric(proto)) df[[nm]] <- as.numeric(NA)
+    else if (is.logical(proto)) df[[nm]] <- as.logical(NA)
+    else                        df[[nm]] <- as.character(NA)
+  }
+  df <- df[, names(template), drop = FALSE]
+  for (nm in names(template)) df[[nm]] <- coerce_scalar(df[[nm]], template[[nm]])
+  df
+}
+
+# ============================ UI ============================
 ui <- fluidPage(
+  # Commit active DT edit on Render click so the change is captured
+  tags$head(tags$script(HTML("
+    $(document).on('click', '#render', function(){
+      if (document.activeElement) document.activeElement.blur();
+    });
+  "))),
   titlePanel("Pedestrian risk — Tefft (2013) & Mueller (2025)"),
   sidebarLayout(
     sidebarPanel(
@@ -101,7 +134,7 @@ ui <- fluidPage(
       numericInput("speedStep","Step", 1, step=1),
       textInput("title", "Title (optional)", ""),
       tags$hr(),
-
+      
       h4("Percent markers"),
       textInput("pctMarkers", "Levels (%)", "10,25,50,75"),
       checkboxInput("showLabels","Show labels", TRUE),
@@ -109,19 +142,19 @@ ui <- fluidPage(
       textInput("labelOffset","Label offset (px, 'dx,dy')", "10,6"),
       numericInput("fixedAngle","Fixed angle (deg, used if rotation = Fixed)", 30),
       tags$hr(),
-
+      
       h4("Color pairing"),
       checkboxInput("matchColors","Pair colors across models", TRUE),
       selectInput("matchBy","Match by", c("Profile ID"="id","Position"="position"), "id"),
       textInput("idKey", "ID key (field name)", "profile_id"),
       checkboxInput("includeId","Include ID in legend", FALSE),
       tags$hr(),
-
+      
       h4("Mueller defaults"),
       selectInput("muDefaultSeverity","Default severity", c("fatal","mais3p","mais2p"), "fatal"),
       selectInput("suvAs","SUVs treated as", c("pickup","car"), "pickup"),
       tags$hr(),
-
+      
       h4("Profiles"),
       actionButton("addTefft","+ Add Tefft profile"),
       actionButton("addMueller","+ Add Mueller profile"),
@@ -136,29 +169,50 @@ ui <- fluidPage(
       tags$hr(),
       strong("Status: "),
       textOutput("status", inline = TRUE),
+      
       tags$hr(),
-      h4("Saved inputs (live view)"),
+      h4("Edit profiles"),
       fluidRow(
         column(6,
-          h5("Tefft (table)"),
-          tableOutput("tblTefft"),
-          h6("Tefft (JSON)"),
-          verbatimTextOutput("jsonTefft", placeholder = TRUE)
+               h5("Tefft — click a cell to edit; select rows to delete"),
+               DTOutput("dtTefft"),
+               div(
+                 style="margin-top:8px",
+                 actionButton("delTefft","Delete selected Tefft row(s)"),
+                 downloadButton("dlTefftCSV","Download Tefft CSV"),
+                 downloadButton("dlTefftJSON","Download Tefft JSON")
+               ),
+               h6("Tefft JSON editor"),
+               textAreaInput("tefftJSON", label = NULL, value = "", rows = 8, placeholder = "Paste/edit JSON array of objects…"),
+               div(
+                 actionButton("fillTefftJSON","Fill editor from table"),
+                 actionButton("applyTefftJSON","Apply editor to Tefft")
+               )
         ),
         column(6,
-          h5("Mueller (table)"),
-          tableOutput("tblMueller"),
-          h6("Mueller (JSON)"),
-          verbatimTextOutput("jsonMueller", placeholder = TRUE)
+               h5("Mueller — click a cell to edit; select rows to delete"),
+               DTOutput("dtMueller"),
+               div(
+                 style="margin-top:8px",
+                 actionButton("delMueller","Delete selected Mueller row(s)"),
+                 downloadButton("dlMuellerCSV","Download Mueller CSV"),
+                 downloadButton("dlMuellerJSON","Download Mueller JSON")
+               ),
+               h6("Mueller JSON editor"),
+               textAreaInput("muellerJSON", label = NULL, value = "", rows = 8, placeholder = "Paste/edit JSON array of objects…"),
+               div(
+                 actionButton("fillMuellerJSON","Fill editor from table"),
+                 actionButton("applyMuellerJSON","Apply editor to Mueller")
+               )
         )
       )
     )
   )
 )
 
-# ---------- SERVER ----------
+# ========================== SERVER ==========================
 server <- function(input, output, session) {
-
+  
   # Seed with two paired profiles for quick testing
   rv <- reactiveValues(
     tefft = data.frame(
@@ -181,16 +235,180 @@ server <- function(input, output, session) {
     plt = NULL,
     last_error = NULL,
     clicks = 0,
-    last_time = ""
+    last_time = "",
+    last_edit_tefft = NULL,
+    last_edit_mueller = NULL
   )
-
-  # UI tables & JSON previews
-  output$tblTefft   <- renderTable(rv$tefft,   bordered = TRUE, striped = TRUE, hover = TRUE, spacing = "xs")
-  output$tblMueller <- renderTable(rv$mueller, bordered = TRUE, striped = TRUE, hover = TRUE, spacing = "xs")
-  output$jsonTefft   <- renderText(toJSON(rv$tefft,   pretty = TRUE, na = "null", dataframe = "rows"))
-  output$jsonMueller <- renderText(toJSON(rv$mueller, pretty = TRUE, na = "null", dataframe = "rows"))
-
-  # Add/clear profile handlers
+  
+  # ---------- Editable DT tables (sorting off; first column locked from edits) ----------
+  output$dtTefft <- renderDT({
+    datatable(
+      rv$tefft,
+      rownames = FALSE,
+      options = list(dom = "tip", pageLength = 6, scrollX = TRUE, ordering = FALSE),
+      editable = list(target = "cell", disable = list(columns = c(0))),
+      selection = "multiple"
+    )
+  })
+  output$dtMueller <- renderDT({
+    datatable(
+      rv$mueller,
+      rownames = FALSE,
+      options = list(dom = "tip", pageLength = 6, scrollX = TRUE, ordering = FALSE),
+      editable = list(target = "cell", disable = list(columns = c(0))),
+      selection = "multiple"
+    )
+  })
+  
+  # DT proxies for smooth in-place updates
+  proxyTefft   <- dataTableProxy("dtTefft")
+  proxyMueller <- dataTableProxy("dtMueller")
+  
+  # Replace visible data when the underlying df changes (no rebind)
+  observeEvent(rv$tefft, ignoreInit = TRUE, {
+    replaceData(proxyTefft, rv$tefft, resetPaging = FALSE, rownames = FALSE)
+  })
+  observeEvent(rv$mueller, ignoreInit = TRUE, {
+    replaceData(proxyMueller, rv$mueller, resetPaging = FALSE, rownames = FALSE)
+  })
+  
+  # In-place cell edits with de-duplication; treat 'col' as 0-based -> add 1
+  observeEvent(input$dtTefft_cell_edit, ignoreInit = TRUE, {
+    info <- input$dtTefft_cell_edit
+    key  <- paste(info$row, info$col, info$value, sep = "|")
+    if (identical(rv$last_edit_tefft, key)) return()
+    rv$last_edit_tefft <- key
+    
+    df <- isolate(rv$tefft)
+    
+    i <- as.integer(info$row)
+    j <- as.integer(info$col) + 1   # <<<<<< IMPORTANT: 0-based -> 1-based
+    
+    if (is.na(i) || is.na(j)) return()
+    if (i < 1 || i > nrow(df)) return()
+    if (j < 1 || j > ncol(df)) return()
+    
+    colname <- names(df)[j]
+    newval  <- coerce_scalar(info$value, df[[colname]])
+    if (!identical(df[i, colname][[1]], newval)) {
+      df[i, colname] <- newval
+      rv$tefft <- df
+    }
+  })
+  
+  observeEvent(input$dtMueller_cell_edit, ignoreInit = TRUE, {
+    info <- input$dtMueller_cell_edit
+    key  <- paste(info$row, info$col, info$value, sep = "|")
+    if (identical(rv$last_edit_mueller, key)) return()
+    rv$last_edit_mueller <- key
+    
+    df <- isolate(rv$mueller)
+    
+    i <- as.integer(info$row)
+    j <- as.integer(info$col) + 1   # <<<<<< IMPORTANT: 0-based -> 1-based
+    
+    if (is.na(i) || is.na(j)) return()
+    if (i < 1 || i > nrow(df)) return()
+    if (j < 1 || j > ncol(df)) return()
+    
+    colname <- names(df)[j]
+    newval  <- coerce_scalar(info$value, df[[colname]])
+    if (!identical(df[i, colname][[1]], newval)) {
+      df[i, colname] <- newval
+      rv$mueller <- df
+    }
+  })
+  
+  # Row deletion
+  observeEvent(input$delTefft, {
+    sel <- input$dtTefft_rows_selected
+    if (length(sel) < 1) {
+      showNotification("Select Tefft row(s) to delete", type = "warning")
+    } else {
+      rv$tefft <- rv$tefft[-sel, , drop = FALSE]
+      showNotification(sprintf("Deleted %d Tefft row(s)", length(sel)), type = "message")
+    }
+  })
+  observeEvent(input$delMueller, {
+    sel <- input$dtMueller_rows_selected
+    if (length(sel) < 1) {
+      showNotification("Select Mueller row(s) to delete", type = "warning")
+    } else {
+      rv$mueller <- rv$mueller[-sel, , drop = FALSE]
+      showNotification(sprintf("Deleted %d Mueller row(s)", length(sel)), type = "message")
+    }
+  })
+  
+  # ---------- Downloads ----------
+  output$dlTefftCSV <- downloadHandler(
+    filename = function() "tefft_profiles.csv",
+    content  = function(file) write.csv(rv$tefft, file, row.names = FALSE)
+  )
+  output$dlTefftJSON <- downloadHandler(
+    filename = function() "tefft_profiles.json",
+    content  = function(file) writeLines(jsonlite::toJSON(rv$tefft, pretty = TRUE, na = "null", dataframe = "rows"), file)
+  )
+  output$dlMuellerCSV <- downloadHandler(
+    filename = function() "mueller_profiles.csv",
+    content  = function(file) write.csv(rv$mueller, file, row.names = FALSE)
+  )
+  output$dlMuellerJSON <- downloadHandler(
+    filename = function() "mueller_profiles.json",
+    content  = function(file) writeLines(jsonlite::toJSON(rv$mueller, pretty = TRUE, na = "null", dataframe = "rows"), file)
+  )
+  
+  # ---------- JSON editors ----------
+  observeEvent(input$fillTefftJSON, {
+    updateTextAreaInput(session, "tefftJSON",
+                        value = jsonlite::toJSON(rv$tefft, pretty = TRUE, na = "null", dataframe = "rows")
+    )
+  })
+  observeEvent(input$fillMuellerJSON, {
+    updateTextAreaInput(session, "muellerJSON",
+                        value = jsonlite::toJSON(rv$mueller, pretty = TRUE, na = "null", dataframe = "rows")
+    )
+  })
+  observeEvent(input$applyTefftJSON, {
+    txt <- input$tefftJSON
+    if (!nzchar(txt)) {
+      showNotification("Tefft JSON editor is empty", type = "warning"); return()
+    }
+    tryCatch({
+      df <- jsonlite::fromJSON(txt)
+      if (!is.data.frame(df)) stop("JSON must be an array of objects")
+      req <- c("profile_id","age_years","height_in","weight_lb","vehicle_is_truck")
+      miss <- setdiff(req, names(df))
+      if (length(miss)) stop(paste("Missing Tefft columns:", paste(miss, collapse = ", ")))
+      rv$tefft <- coerce_df_to_template(df, rv$tefft[0, ])
+      showNotification("Applied Tefft JSON", type = "message")
+    }, error = function(e) {
+      showNotification(paste("Tefft JSON error:", e$message), type = "error", duration = 6)
+    })
+  })
+  observeEvent(input$applyMuellerJSON, {
+    txt <- input$muellerJSON
+    if (!nzchar(txt)) {
+      showNotification("Mueller JSON editor is empty", type = "warning"); return()
+    }
+    tryCatch({
+      df <- jsonlite::fromJSON(txt)
+      if (!is.data.frame(df)) stop("JSON must be an array of objects")
+      base_req <- c("profile_id","age_years","sex_male","severity")
+      miss <- setdiff(base_req, names(df))
+      if (length(miss)) stop(paste("Missing Mueller columns:", paste(miss, collapse = ", ")))
+      if (!("hle_cm" %in% names(df)) && !("vehicle_type" %in% names(df))) {
+        stop("Mueller profiles need either 'hle_cm' or 'vehicle_type'")
+      }
+      if (!("hle_cm" %in% names(df))) df$hle_cm <- NA_real_
+      if (!("vehicle_type" %in% names(df))) df$vehicle_type <- NA_character_
+      rv$mueller <- coerce_df_to_template(df, rv$mueller[0, ])
+      showNotification("Applied Mueller JSON", type = "message")
+    }, error = function(e) {
+      showNotification(paste("Mueller JSON error:", e$message), type = "error", duration = 6)
+    })
+  })
+  
+  # ---------- Add / Clear profile modals ----------
   observeEvent(input$addTefft, {
     showModal(modalDialog(
       title = "Add Tefft profile",
@@ -217,7 +435,7 @@ server <- function(input, output, session) {
     ))
     showNotification("Tefft profile added", type = "message")
   })
-
+  
   observeEvent(input$addMueller, {
     showModal(modalDialog(
       title = "Add Mueller profile",
@@ -250,11 +468,11 @@ server <- function(input, output, session) {
     ))
     showNotification("Mueller profile added", type = "message")
   })
-
+  
   observeEvent(input$clearTefft,  { rv$tefft  <- rv$tefft[0,];  showNotification("Cleared Tefft profiles", type="message") })
   observeEvent(input$clearMueller,{ rv$mueller<- rv$mueller[0,]; showNotification("Cleared Mueller profiles", type="message") })
-
-  # Render status
+  
+  # ---------- Status ----------
   output$status <- renderText({
     paste0("renders: ", rv$clicks,
            " | last: ", rv$last_time,
@@ -262,207 +480,217 @@ server <- function(input, output, session) {
            " | mueller profiles: ", nrow(rv$mueller),
            if (!is.null(rv$last_error)) paste0(" | last error: ", rv$last_error) else "")
   })
-
-  # Core plot recompute on click
+  
+  # ---------- Plot builder ----------
+  build_plot <- function() {
+    units <- input$units
+    x <- linspace(input$speedMin, input$speedMax, input$speedStep)
+    x_mph <- if (units=="mph") x else x / MPH_TO_KMH
+    x_kmh <- if (units=="kmh") x else x * MPH_TO_KMH
+    
+    pct <- suppressWarnings(as.numeric(strsplit(gsub("\\s+","", input$pctMarkers), ",")[[1]]))
+    pct <- pct[is.finite(pct) & pct >= 0 & pct <= 100] / 100
+    if (length(pct) == 0) pct <- c(0.10, 0.25, 0.50, 0.75)
+    
+    rotMode <- input$rotMode
+    fixedAngle <- if (rotMode == "fixed") input$fixedAngle else 0
+    offs <- if (!is.null(input$labelOffset) && grepl(",", input$labelOffset)) strsplit(input$labelOffset,",")[[1]] else c("10","6")
+    xshift <- suppressWarnings(as.numeric(offs[1])); if (!is.finite(xshift)) xshift <- 10
+    yshift <- suppressWarnings(as.numeric(offs[2])); if (!is.finite(yshift)) yshift <- 6
+    
+    doTefft   <- input$model %in% c("tefft","both")
+    doMueller <- input$model %in% c("mueller","both")
+    if (doTefft && nrow(rv$tefft)==0)  stop("Add at least one Tefft profile or switch model.")
+    if (doMueller && nrow(rv$mueller)==0) stop("Add at least one Mueller profile or switch model.")
+    
+    colorway <- c("#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd",
+                  "#8c564b","#e377c2","#7f7f7f","#bcbd22","#17becf")
+    color_map <- new.env(parent = emptyenv())
+    color_for_id <- function(pid) {
+      if (is.na(pid) || is.null(pid)) return(NA_character_)
+      key <- paste0("id_", pid)
+      if (!exists(key, envir = color_map, inherits = FALSE)) {
+        idx <- length(ls(envir = color_map, all.names = TRUE)) %% length(colorway) + 1
+        assign(key, colorway[idx], envir = color_map)
+      }
+      get(key, envir = color_map, inherits = FALSE)
+    }
+    
+    p <- plot_ly()
+    annotations <- list()
+    tefft_colors_by_idx <- character(0)
+    
+    # ----- TEFFT (solid) -----
+    if (doTefft) {
+      for (i in seq_len(nrow(rv$tefft))) {
+        tp <- rv$tefft[i,]
+        y <- tefft_prob_guarded(x_mph, tp$age_years, tp$height_in, tp$weight_lb, NULL, tp$vehicle_is_truck, "speed_only")
+        
+        col <- NA
+        if (isTRUE(input$matchColors)) {
+          if (input$matchBy == "id" && !is.na(tp[[input$idKey]])) col <- color_for_id(tp[[input$idKey]])
+          if (input$matchBy == "position") col <- colorway[(i-1) %% length(colorway) + 1]
+        }
+        tefft_colors_by_idx[i] <- ifelse(is.na(col), "", col)
+        
+        veh <- if (tp$vehicle_is_truck==1) "Light truck/SUV" else "Car"
+        pid <- tp[[input$idKey]]
+        idtxt <- if (isTRUE(input$includeId) && !is.na(pid)) paste0("[",pid,"] ") else ""
+        lbl <- sprintf("%sTefft — %dy, %d\" %d lb, %s",
+                       idtxt, round(tp$age_years), round(tp$height_in), round(tp$weight_lb), veh)
+        
+        p <- add_lines(
+          p, x = x, y = y, name = lbl,
+          line = list(color = nz_col(col), width = 3, dash = "solid"),
+          hovertemplate = sprintf("<b>%%{y:.2%%}</b> at %%{x:.1f} %s<extra></extra>", units)
+        )
+        
+        for (q in pct) {
+          xq <- crossing_x(x, y, q); if (is.null(xq)) next
+          p <- add_markers(p, x = xq, y = q, showlegend = FALSE,
+                           marker = list(size = 9, color = nz_col(col),
+                                         line = list(color = "#ffffff", width = 1)))
+          if (isTRUE(input$showLabels)) {
+            ang <- if (rotMode == "auto") slope_angle_deg(x, y, xq) else if (rotMode=="fixed") fixedAngle else 0
+            annotations[[length(annotations)+1]] <- list(
+              x = xq, y = q, xref = "x", yref = "y",
+              text = sprintf("%d%% @ %.1f %s", round(q*100), xq, units),
+              showarrow = FALSE, xanchor = "left", yanchor = "bottom",
+              xshift = xshift, yshift = yshift, font = list(size = 11, color = "#FFFFFF"),
+              textangle = ang, bgcolor = "rgba(0,0,0,0)"
+            )
+          }
+        }
+      }
+    }
+    
+    # ----- MUELLER (dotted) -----
+    if (doMueller) {
+      for (j in seq_len(nrow(rv$mueller))) {
+        mp <- rv$mueller[j,]
+        hle <- if (!is.na(mp$hle_cm)) mp$hle_cm else vehicle_hle_guess(mp$vehicle_type, suv_as = input$suvAs, van_as = "pickup")
+        sev <- if (nzchar(mp$severity)) mp$severity else input$muDefaultSeverity
+        y2 <- mueller_prob(x_kmh, hle, as.numeric(mp$sex_male), mp$age_years, sev)
+        
+        col <- NA
+        if (isTRUE(input$matchColors)) {
+          if (input$matchBy == "id" && !is.na(mp[[input$idKey]])) {
+            col <- color_for_id(mp[[input$idKey]])
+          } else if (input$matchBy == "position" && j <= length(tefft_colors_by_idx)) {
+            col <- tefft_colors_by_idx[j]; if (identical(col,"")) col <- NA
+          }
+        }
+        
+        sexlab <- if (mp$sex_male==1) "Male" else "Female"
+        pid <- mp[[input$idKey]]
+        idtxt <- if (isTRUE(input$includeId) && !is.na(pid)) paste0("[",pid,"] ") else ""
+        sev_map <- c(fatal = "Fatal", mais3p = "MAIS 3+F", mais2p = "MAIS 2+F")
+        lbl2 <- sprintf("%sMueller — %dy, HLE %d cm, %s, %s",
+                        idtxt, round(mp$age_years), round(hle), sexlab, sev_map[[sev]])
+        
+        p <- add_lines(
+          p, x = x, y = y2, name = lbl2,
+          line = list(color = nz_col(col), width = 3, dash = "dot"),
+          hovertemplate = sprintf("<b>%%{y:.2%%}</b> at %%{x:.1f} %s<extra></extra>", units)
+        )
+        
+        for (q in pct) {
+          xq <- crossing_x(x, y2, q); if (is.null(xq)) next
+          p <- add_markers(p, x = xq, y = q, showlegend = FALSE,
+                           marker = list(size = 9, color = nz_col(col),
+                                         line = list(color = "#ffffff", width = 1)))
+          if (isTRUE(input$showLabels)) {
+            ang <- if (rotMode == "auto") slope_angle_deg(x, y2, xq) else if (rotMode=="fixed") fixedAngle else 0
+            annotations[[length(annotations)+1]] <- list(
+              x = xq, y = q, xref = "x", yref = "y",
+              text = sprintf("%d%% @ %.1f %s", round(q*100), xq, units),
+              showarrow = FALSE, xanchor = "left", yanchor = "bottom",
+              xshift = xshift, yshift = yshift, font = list(size = 11, color = "#FFFFFF"),
+              textangle = ang, bgcolor = "rgba(0,0,0,0)"
+            )
+          }
+        }
+      }
+    }
+    
+    ttl <- if (nchar(input$title)) input$title else
+      if (input$model == "both") "Pedestrian risk vs. speed — Tefft (2013) & Monfort/Mueller (2025)"
+    else if (input$model == "tefft") "Pedestrian death risk vs. speed — Tefft (2013)"
+    else "Pedestrian injury risk vs. speed — Monfort & Mueller (2025)"
+    
+    p <- layout(
+      p,
+      template = "plotly_dark",
+      paper_bgcolor = "#111111", plot_bgcolor = "#111111",
+      font = list(color = "white"),
+      title = list(text = ttl, x = 0.02, xanchor = "left", font = list(color = "white")),
+      xaxis = list(
+        title = paste0("Impact speed (", input$units, ")"),
+        titlefont = list(color = "white"),
+        tickfont  = list(color = "white"),
+        gridcolor = "#333333",
+        zerolinecolor = "#333333"
+      ),
+      yaxis = list(
+        title = "Probability",
+        range = c(0,1),
+        titlefont = list(color = "white"),
+        tickfont  = list(color = "white"),
+        gridcolor = "#333333",
+        zerolinecolor = "#333333"
+      ),
+      legend = list(
+        orientation = "h",
+        yanchor = "bottom", y = 1.02, x = 0,
+        bgcolor="rgba(0,0,0,0)",
+        font = list(color = "white")
+      ),
+      margin = list(l=64, r=24, t=64, b=64),
+      annotations = annotations
+    )
+    p
+  }
+  
+  # ---------- Render button ----------
   observeEvent(input$render, {
     rv$clicks <- rv$clicks + 1
     rv$last_time <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
-
     tryCatch({
-
-      units <- input$units
-      x <- linspace(input$speedMin, input$speedMax, input$speedStep)
-      x_mph <- if (units=="mph") x else x / MPH_TO_KMH
-      x_kmh <- if (units=="kmh") x else x * MPH_TO_KMH
-
-      # parse pct markers
-      pct <- suppressWarnings(as.numeric(strsplit(gsub("\\s+","", input$pctMarkers), ",")[[1]]))
-      pct <- pct[is.finite(pct) & pct >= 0 & pct <= 100] / 100
-      if (length(pct) == 0) pct <- c(0.10, 0.25, 0.50, 0.75)
-
-      rotMode <- input$rotMode
-      fixedAngle <- if (rotMode == "fixed") input$fixedAngle else 0
-      offs <- if (!is.null(input$labelOffset) && grepl(",", input$labelOffset)) strsplit(input$labelOffset,",")[[1]] else c("10","6")
-      xshift <- suppressWarnings(as.numeric(offs[1])); if (!is.finite(xshift)) xshift <- 10
-      yshift <- suppressWarnings(as.numeric(offs[2])); if (!is.finite(yshift)) yshift <- 6
-
-      doTefft   <- input$model %in% c("tefft","both")
-      doMueller <- input$model %in% c("mueller","both")
-
-      if (doTefft && nrow(rv$tefft)==0)  stop("Add at least one Tefft profile or switch model.")
-      if (doMueller && nrow(rv$mueller)==0) stop("Add at least one Mueller profile or switch model.")
-
-      # color pairing
-      colorway <- c("#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd",
-                    "#8c564b","#e377c2","#7f7f7f","#bcbd22","#17becf")
-      color_map <- new.env(parent = emptyenv())
-      color_for_id <- function(pid) {
-        if (is.na(pid) || is.null(pid)) return(NA_character_)
-        key <- paste0("id_", pid)
-        if (!exists(key, envir = color_map, inherits = FALSE)) {
-          idx <- length(ls(envir = color_map, all.names = TRUE)) %% length(colorway) + 1
-          assign(key, colorway[idx], envir = color_map)
-        }
-        get(key, envir = color_map, inherits = FALSE)
-      }
-
-      p <- plot_ly()
-      annotations <- list()
-      tefft_colors_by_idx <- character(0)
-
-      # ----- TEFFT (solid) -----
-      if (doTefft) {
-        for (i in seq_len(nrow(rv$tefft))) {
-          tp <- rv$tefft[i,]
-          y <- tefft_prob_guarded(x_mph, tp$age_years, tp$height_in, tp$weight_lb, NULL, tp$vehicle_is_truck, "speed_only")
-
-          col <- NA
-          if (isTRUE(input$matchColors)) {
-            if (input$matchBy == "id" && !is.na(tp[[input$idKey]])) col <- color_for_id(tp[[input$idKey]])
-            if (input$matchBy == "position") col <- colorway[(i-1) %% length(colorway) + 1]
-          }
-          tefft_colors_by_idx[i] <- ifelse(is.na(col), "", col)
-
-          veh <- if (tp$vehicle_is_truck==1) "Light truck/SUV" else "Car"
-          pid <- tp[[input$idKey]]
-          idtxt <- if (isTRUE(input$includeId) && !is.na(pid)) paste0("[",pid,"] ") else ""
-          lbl <- sprintf("%sTefft — %dy, %d\" %d lb, %s",
-                         idtxt, round(tp$age_years), round(tp$height_in), round(tp$weight_lb), veh)
-
-          p <- add_lines(
-              p, x = x, y = y, name = lbl,
-              line = list(color = if (is.na(col)) NULL else col, width = 3, dash = "solid"),
-              hovertemplate = sprintf("<b>%%{y:.2%%}</b> at %%{x:.1f} %s<extra></extra>", units)
-          )
-          
-
-          for (q in pct) {
-            xq <- crossing_x(x, y, q); if (is.null(xq)) next
-            p <- add_markers(
-                p, x = xq, y = q, showlegend = FALSE,
-                marker = list(
-                    size = 9,
-                    color = if (is.na(col)) NULL else col,
-                    line = list(color = "#ffffff", width = 1)
-                )
-            )
-            if (isTRUE(input$showLabels)) {
-              ang <- if (rotMode == "auto") slope_angle_deg(x, y, xq) else if (rotMode=="fixed") fixedAngle else 0
-              annotations[[length(annotations)+1]] <- list(
-                x = xq, y = q, xref = "x", yref = "y",
-                text = sprintf("%d%% @ %.1f %s", round(q*100), xq, units),
-                showarrow = FALSE, xanchor = "left", yanchor = "bottom",
-                xshift = xshift, yshift = yshift, font = list(size = 11, color = "#e5e5e5"),
-                textangle = ang, bgcolor = "rgba(0,0,0,0)"
-              )
-            }
-          }
-        }
-      }
-
-      # ----- MUELLER (dotted) -----
-      if (doMueller) {
-        for (j in seq_len(nrow(rv$mueller))) {
-          mp <- rv$mueller[j,]
-          hle <- if (!is.na(mp$hle_cm)) mp$hle_cm else vehicle_hle_guess(mp$vehicle_type, suv_as = input$suvAs, van_as = "pickup")
-          sev <- if (nzchar(mp$severity)) mp$severity else input$muDefaultSeverity
-          y2 <- mueller_prob(x_kmh, hle, as.numeric(mp$sex_male), mp$age_years, sev)
-
-          col <- NA
-          if (isTRUE(input$matchColors)) {
-            if (input$matchBy == "id" && !is.na(mp[[input$idKey]])) {
-              col <- color_for_id(mp[[input$idKey]])
-            } else if (input$matchBy == "position" && j <= length(tefft_colors_by_idx)) {
-              col <- tefft_colors_by_idx[j]; if (identical(col,"")) col <- NA
-            }
-          }
-
-          sexlab <- if (mp$sex_male==1) "Male" else "Female"
-          pid <- mp[[input$idKey]]
-          idtxt <- if (isTRUE(input$includeId) && !is.na(pid)) paste0("[",pid,"] ") else ""
-          sev_map <- c(fatal = "Fatal", mais3p = "MAIS 3+F", mais2p = "MAIS 2+F")
-          lbl2 <- sprintf("%sMueller — %dy, HLE %d cm, %s, %s",
-                          idtxt, round(mp$age_years), round(hle), sexlab, sev_map[[sev]])
-
-          p <- add_lines(
-              p, x = x, y = y2, name = lbl2,
-              line = list(color = if (is.na(col)) NULL else col, width = 3, dash = "dot"),
-              hovertemplate = sprintf("<b>%%{y:.2%%}</b> at %%{x:.1f} %s<extra></extra>", units)
-          )
-
-          for (q in pct) {
-            xq <- crossing_x(x, y2, q); if (is.null(xq)) next
-            p <- add_markers(
-                p, x = xq, y = q, showlegend = FALSE,
-                marker = list(
-                    size = 9,
-                    color = if (is.na(col)) NULL else col,
-                    line = list(color = "#ffffff", width = 1)
-                )
-            )
-            if (isTRUE(input$showLabels)) {
-              ang <- if (rotMode == "auto") slope_angle_deg(x, y2, xq) else if (rotMode=="fixed") fixedAngle else 0
-              annotations[[length(annotations)+1]] <- list(
-                x = xq, y = q, xref = "x", yref = "y",
-                text = sprintf("%d%% @ %.1f %s", round(q*100), xq, units),
-                showarrow = FALSE, xanchor = "left", yanchor = "bottom",
-                xshift = xshift, yshift = yshift, font = list(size = 11, color = "#e5e5e5"),
-                textangle = ang, bgcolor = "rgba(0,0,0,0)"
-              )
-            }
-          }
-        }
-      }
-
-      ttl <- if (nchar(input$title)) input$title else
-        if (input$model == "both") "Pedestrian risk vs. speed — Tefft (2013) & Monfort/Mueller (2025)"
-        else if (input$model == "tefft") "Pedestrian death risk vs. speed — Tefft (2013)"
-        else "Pedestrian injury risk vs. speed — Monfort & Mueller (2025)"
-
-      p <- layout(
-        p,
-        template = "plotly_dark",
-        paper_bgcolor = "#111111", plot_bgcolor = "#111111",
-        title = list(text = ttl, x = 0.02, xanchor = "left"),
-        xaxis = list(title = paste0("Impact speed (", input$units, ")")),
-        yaxis = list(title = "Probability", range = c(0,1)),
-        legend = list(orientation = "h", yanchor = "bottom", y = 1.02, x = 0, bgcolor="rgba(0,0,0,0)"),
-        margin = list(l=64, r=24, t=64, b=64),
-        annotations = annotations
-      )
-
-      rv$plt <- p
+      rv$plt <- build_plot()
       rv$last_error <- NULL
-
     }, error = function(e) {
       rv$plt <- NULL
       rv$last_error <- conditionMessage(e)
       showNotification(paste("Plot error:", rv$last_error), type = "error", duration = 6)
     })
   })
-
+  
   # Always render whatever the latest plot is
   output$plot <- renderPlotly({
     if (is.null(rv$plt)) return(NULL)
     rv$plt
   })
-
-  # First render once on load so you see something immediately
+  
+  # Initial render so you see something on load
   observeEvent(TRUE, {
     if (is.null(rv$plt)) {
-      isolate({
-        # simulate a click to render with defaults
-        session$sendCustomMessage("noop", NULL)
-        input$render # reference to bind
-      })
-      # Directly call the same code as in observeEvent without duplicating:
-      # just trigger a fake click
-      session$sendInputMessage("render", list(value = 1))
+      try({
+        rv$plt <- build_plot()
+      }, silent = TRUE)
     }
   }, once = TRUE)
+  
+  # ---------- Status ----------
+  output$status <- renderText({
+    paste0("renders: ", rv$clicks,
+           " | last: ", rv$last_time,
+           " | tefft profiles: ", nrow(rv$tefft),
+           " | mueller profiles: ", nrow(rv$mueller),
+           if (!is.null(rv$last_error)) paste0(" | last error: ", rv$last_error) else "")
+  })
 }
 
 shinyApp(ui, server)
-# 
+
 # library(rsconnect)
 # rsconnect::deployApp('/Users/balmdale/code/ped_fatality_risk')
